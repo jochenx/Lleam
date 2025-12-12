@@ -1,4 +1,7 @@
 # Lleam
+
+LLeam = Llm + Lean
+
 A verification tool that checks LLM statements for truth. Grounding is assured by fact extraction with a derivation and conclusion anchored in a formal proof. 
 A theorem prover complements the LLM in arriving at a proof of statement and opportunities to fix the proof if there are problems with it.
 
