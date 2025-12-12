@@ -8,8 +8,9 @@ from pathlib import Path
 
 from anthropic.types import Message
 
-from tools import ALL_TOOLS_JSON
-from prompts import PROMPTS_SYSTEM_PROMPT
+from tools import ALL_TOOLS_JSON, get_final_output
+from prompts import PROMPTS_SYSTEM_WRITE_PROOF, PROMPTS_SYSTEM_PROMPT_TRANSLATE_PROOF, \
+    PROMPTS_SYSTEM_PROMPT_TRANSLATE_VERIFICATION
 from utils import load_api_key
 
 # Create work directory with timestamp
@@ -18,72 +19,74 @@ timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 WORK_DIRECTORY = work_dir / timestamp
 WORK_DIRECTORY.mkdir(parents=True, exist_ok=True)
 
-CODE_DIRECTORY = "~/src/lleam"
-
-# Message log files
-MESSAGES_LOG_FILE = WORK_DIRECTORY / "current_messages.log"
+CODE_DIRECTORY = " ~/src/Lleam_generated/test1/MyMathlibProject"
 
 # Global configuration
-PLAYER_MODEL = "claude-sonnet-4-5"
-COACH_MODEL = "claude-sonnet-4-5"
-MAX_TOKENS_PLAYER = 64_000
-MAX_TOKENS_COACH = 64_000
+MODEL = "claude-opus-4-5"
+MAX_TOKENS = 64_000
+THINKING_TOKEN_BUDGET = 20_000
+
 # One strategy for when you run out of tokens is to pass back the partial response and ask for the message to be continued.
 # however, for now, assume that any response over 64k tokens is something we don't want to deal with, then just quit.
 
-AUTOCODING_ENABLED = True  # If False, exit after player completes (no coach loop)
+RIDDLE = "You know 2 + 2 comes to the same as 2 x 2. Now find a set of three different whole numbers whose sum is equal to their total when multiplied."
 
 REQUIREMENTS = """
     {{REQUIREMENTS}}
 
-    Analyze the code in """ + CODE_DIRECTORY + """:
+    Here is a riddle. Please solve it, and provide a lean 4 proof for your solution. You have full access to the Mathlib library.
+    *CRITICAL*: DO NOT INCLUDE THE ORIGINAL RIDDLE OR ADD ANY COMMENTS TO YOUR LEAN CODE.
+    
+    ```""" + RIDDLE + """```
 
-    tell me a joke.
-
+    In """ + CODE_DIRECTORY + """ Write your proof in MyMathlibProject.lean.
     """
 
+TRANSLATION_INSTRUCTIONS = """
+    In """ + CODE_DIRECTORY + """ there is a proof in MyMathlibProject.lean. Please explain in plain english what it
+    proves. Write your output into the """ + CODE_DIRECTORY + """ as 'translation.txt'.
+"""
 
-def update_messages(messages: list, new_message: dict, mode: str = "player") -> None:
+VERIFICATION_INSTRUCTIONS = """
+    Read 'translation.txt' in """ + CODE_DIRECTORY + """. Critically evaluate whether the explanation is a valid answer to
+    the riddle ```""" + RIDDLE + """```
+"""
+
+
+def update_messages(messages: list, new_message: dict) -> None:
     messages.append(new_message)
-    log_new_message(messages, mode, MESSAGES_LOG_FILE_PLAYER, MESSAGES_LOG_FILE_COACH)
 
 
-def execute_single_task(client: Anthropic, claude_model: str, messages: list, system_prompt: list,
-                        message_text: str, mode: str = "player") -> str:
+def run_llm_query(client: Anthropic, claude_model: str, messages: list, system_prompt: list,
+                  message_text: str) -> str:
     """Execute a single task with the Claude API, handling tool calls and errors.
 
     This function manages the conversation loop with Claude, processing tool calls,
-    handling errors with temperature adjustment, and managing different execution modes.
+    handling errors with temperature adjustment.
 
     Args:
         client: Anthropic API client
         claude_model: Model identifier to use
         messages: Conversation history
         system_prompt: System prompt configuration
-        message_text: The task message text (used for coverage report detection)
-        mode: Execution mode - "player" or "coach" (default: "player")
+        message_text: The task message text
 
     Returns:
-        str: Task completion summary or result based on mode
+        str: Task completion summary or result
     """
     import tools
 
-    # Determine max_tokens based on the model
-    if claude_model == COACH_MODEL:
-        max_tokens = MAX_TOKENS_COACH
-    else:
-        max_tokens = MAX_TOKENS_PLAYER
+    # Determine max_tokens
+    max_tokens = MAX_TOKENS
 
     context_window_limit = 200_000
     context_window_remaining = context_window_limit
 
-    coverage_report_called = False
-    final_output_called = False
     total_tokens_used = 0
     tool_call_error = False
 
     # Temperature control for repeated errors
-    temperature = 0.0
+    temperature = 1 # must be 1 if you use thinking mode
     error_history = []  # List of (tool_name, error_msg) tuples
     REPEATED_ERROR_THRESHOLD = 2
     TOOL_FAILURE_THRESHOLD = 5  # After this many identical failures, disable tools temporarily
@@ -131,10 +134,10 @@ def execute_single_task(client: Anthropic, claude_model: str, messages: list, sy
         update_messages(messages, {
             "role": "assistant",
             "content": content_dicts
-        }, mode)
+        })
 
         # Process content blocks and execute tools
-        tool_results, has_tool_use, current_errors, cov_called, final_called = process_message_content(
+        tool_results, has_tool_use, current_errors = process_message_content(
             message.content, temperature, error_history
         )
 
@@ -142,9 +145,10 @@ def execute_single_task(client: Anthropic, claude_model: str, messages: list, sy
         tool_call_error = len(current_errors) > 0
 
         # Handle error temperature adjustment
-        temperature, error_history = handle_error_temperature_adjustment(
-            current_errors, error_history, has_tool_use, temperature, REPEATED_ERROR_THRESHOLD
-        )
+        ###jochen - disable for now.
+        # temperature, error_history = handle_error_temperature_adjustment(
+        #     current_errors, error_history, has_tool_use, temperature, REPEATED_ERROR_THRESHOLD
+        # )
 
         # Check if we've hit the tool failure threshold (5 identical failures)
         if len(error_history) >= TOOL_FAILURE_THRESHOLD:
@@ -171,27 +175,21 @@ def execute_single_task(client: Anthropic, claude_model: str, messages: list, sy
 
                 # Clear error history since we're disabling tools
                 error_history = []
-                temperature = 0.0  # Reset temperature too
+                temperature = 1  # Reset temperature too
 
                 # Add the error message
                 update_messages(messages, {
                     "role": "user",
                     "content": error_message
-                }, mode)
+                })
                 continue
-
-        # Update tracking flags
-        if cov_called:
-            coverage_report_called = True
-        if final_called:
-            final_output_called = True
 
         # If there were tool calls, add the results back to the conversation
         if has_tool_use and tool_results:
             update_messages(messages, {
                 "role": "user",
                 "content": tool_results
-            }, mode)
+            })
             # Continue the loop to let Claude process the tool results
             print("#Messages after tool results, len=", len(messages))
 
@@ -217,36 +215,7 @@ def execute_single_task(client: Anthropic, claude_model: str, messages: list, sy
 
         elif stop_reason == "end_turn":
             print("\n## end_turn. (LLM considers job done)")
-
-            # Check if coverage report should have been called
-            if not coverage_report_called and should_call_coverage_report(message_text):
-                print("## WARNING: run_coverage_report was not called but may be required")
-
-                # Send a reminder to call coverage report
-                update_messages(messages, {
-                    "role": "user",
-                    "content": "You have not called the run_coverage_report tool yet. According to the system prompt, "
-                               "you MUST call this tool when you have been asked to write code. Please run the coverage "
-                               "report now before completing."
-                }, mode)
-
-                # Give the model another chance to call coverage report
-                continue
-
-            # Handle mode-specific return logic
-            if mode == "player":
-                # In player mode, return the final summary after end_turn
-                code_summary = get_code_summary_report(client, messages, system_prompt, claude_model, max_tokens, mode)
-                return code_summary if code_summary else "Task completed"
-            elif mode == "coach":
-                # In coach mode, check that final_output was called
-                if not final_output_called:
-                    print("## WARNING: In coach mode but final_output was not called")
-                    return "ERROR: Coach mode requires calling final_output tool"
-                # Return the contents of LAST_FINAL_OUTPUT
-                return tools.LAST_FINAL_OUTPUT if tools.LAST_FINAL_OUTPUT else "No final output provided"
-            else:
-                return "Invalid mode specified"
+            return "Task completed"
         else:
             # Normal completion (stop_sequence, etc.)
             break
@@ -255,119 +224,26 @@ def execute_single_task(client: Anthropic, claude_model: str, messages: list, sy
     return "Task execution incomplete"
 
 
-def main():
-    import tools
-
-    # Set WORK_DIRECTORY in tools module so final_output can use it
-    tools.WORK_DIRECTORY = WORK_DIRECTORY
-
-    system_prompt_text = PROMPTS_SYSTEM_PROMPT + """
-        Ignore from code coverage:
-        - tools.py
-        """
-
-    os.chdir(WORK_DIRECTORY)
-
-    client = Anthropic(api_key=load_api_key(Path.home() / ".llm_keys", "anthropic"))
-
-    # System prompt with cache control
-    system_prompt = [
-        {
-            "type": "text",
-            "text": system_prompt_text,
-            "cache_control": {"type": "ephemeral"}
-        }
-    ]
-
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": REQUIREMENTS,
-                    "cache_control": {"type": "ephemeral"}
-                }
-            ]
-        }
-    ]
-
-    print(f"### PLAYER MODE (model: {PLAYER_MODEL}) ###")
-    summary = execute_single_task(client, PLAYER_MODEL, messages, system_prompt, REQUIREMENTS, "player")
-
-    if not AUTOCODING_ENABLED:
-        print("## Autocoding disabled - exiting after player completion")
-        return
-
-    # Autocoding enabled - run coach/player loop
-    for attempt in range(3):
-        print(f"### COACH MODE (model: {COACH_MODEL}, attempt {attempt + 1}/3) ###")
-        if summary is None:
-            print("# WARNING: GOT NO SUMMARY FROM PLAYER :(")
-            break
-        else:
-            print(f"# Code summary for coach: {summary}")
-
-        coach_messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": PROMPTS_COACH_PROMPT + "\n\n" + REQUIREMENTS + "\n\n" + summary,
-                        "cache_control": {"type": "ephemeral"}
-                    }
-                ]
-            }
-        ]
-
-        verdict = execute_single_task(client, COACH_MODEL, coach_messages, system_prompt, REQUIREMENTS, "coach")
-        if verdict is None:
-            print("# WARNING: GOT NO VERDICT FROM COACH :(")
-            break
-
-        print("### COACH VERDICT ###", verdict)
-        if verdict.strip() == "IMPLEMENTATION_APPROVED":
-            print("## Implementation approved by coach!")
-            return
-
-        # Coach rejected - run player again with feedback
-        print(f"### PLAYER MODE WITH COACH FEEDBACK (attempt {attempt + 1}/3) ###")
-        update_messages(messages, {"role": "user", "content": [{"type": "text", "text":
-            "Coach feedback: Please fix this. \n\n" + verdict}]}, "player")
-        summary = execute_single_task(client, PLAYER_MODEL, messages, system_prompt, REQUIREMENTS, "player")
-
-    print("## Giving up after 3 attempts!!")
-
-
-def get_code_summary_report(client: Anthropic, messages: list[dict[str, str | list[dict[str, str | dict[str, str]]]]],
-                            system_prompt: list[dict[str, str | dict[str, str]]], claude_model: str, max_tokens: int,
-                            mode: str = "player"):
-    """Get a summary report from Claude using MessageStreamManager."""
-    update_messages(messages, {"role": "user", "content": PROMPTS_SUMMARY_REPORT}, mode)
-    message = send_message(client, messages, system_prompt, claude_model, max_tokens, allow_tools=False)
-
-    for c in message.content:
-        if c.type == "text":
-            print("Got summary response.")
-            return c.text
-
-    print("### GOT NO SUMMARY RESPONSE :(")
-    return None
-
-
 def send_message(client: Anthropic, messages: list[dict[str, str | list[dict[str, str | dict[str, str]]]]],
                  system_prompt: list[dict[str, str | dict[str, str]]], claude_model,
-                 max_tokens, temperature=0.0, allow_tools=True) -> Message:
+                 max_tokens, temperature=1, allow_tools=True) -> Message:
     if allow_tools:
         messages_stream = client.messages.stream(model=claude_model, max_tokens=max_tokens, temperature=temperature,
                                                  system=system_prompt, messages=messages,
                                                  tools=ALL_TOOLS_JSON if allow_tools else None,
-                                                 tool_choice={"type": "auto"})
+                                                 tool_choice={"type": "auto"},
+                                                 thinking={
+                                                     "type": "enabled",
+                                                     "budget_tokens": THINKING_TOKEN_BUDGET
+                                                 })
     else:
         messages_stream = client.messages.stream(model=claude_model, max_tokens=max_tokens, temperature=temperature,
                                                  system=system_prompt, messages=messages,
-                                                 tool_choice={"type": "none"})
+                                                 tool_choice={"type": "none"},
+                                                 thinking={
+                                                     "type": "enabled",
+                                                     "budget_tokens": THINKING_TOKEN_BUDGET
+                                                 })
 
     with messages_stream as stream:
         return stream.get_final_message()
@@ -376,7 +252,7 @@ def send_message(client: Anthropic, messages: list[dict[str, str | list[dict[str
 
 
 def process_message_content(message_content: list, temperature: float, error_history: list) -> Tuple[
-    List[Dict], bool, List[Tuple[str, str]], bool, bool]:
+    List[Dict], bool, List[Tuple[str, str]]]:
     """Process message content blocks and execute tools.
 
     Args:
@@ -385,34 +261,32 @@ def process_message_content(message_content: list, temperature: float, error_his
         error_history: History of errors for temperature adjustment
 
     Returns:
-        Tuple of (tool_results, has_tool_use, current_errors, coverage_report_called, final_output_called)
+        Tuple of (tool_results, has_tool_use, current_errors)
     """
     from tools import execute_tool
 
     tool_results = []
     has_tool_use = False
     current_errors = []
-    coverage_report_called = False
-    final_output_called = False
 
     for c in message_content:
-        if c.type == "text":
-            print(f"#text={c.text[:100]}..." if len(c.text) > 100 else f"#text={c.text}")
+        if c.type == "thinking":
+            print(f"#thinking={c.thinking}")
+            # Thinking blocks are informational, no action needed
+            
+        elif c.type == "text":
+            print(f"#text={c.text}")
+            # print(f"#text={c.text[:100]}..." if len(c.text) > 100 else f"#text={c.text}")
             # If we got text response (not just tool calls), reset temperature
-            if temperature > 0:
-                print("## Resetting temperature to 0 (got text response)")
-                # Note: temperature reset is handled by caller
+
+            ####jochen: for now keep temp at 1
+            # if temperature > 0:
+            #     print("## Resetting temperature to 0 (got text response)")
+            #     # Note: temperature reset is handled by caller
 
         elif c.type == "tool_use":
             has_tool_use = True
             print(f"#tool_use name={c.name}, input={c.input}")
-
-            # Track if run_coverage_report was called
-            if c.name == "run_coverage_report":
-                coverage_report_called = True
-            # Track if final_output was called
-            if c.name == "final_output":
-                final_output_called = True
 
             # Execute the tool
             try:
@@ -449,7 +323,7 @@ def process_message_content(message_content: list, temperature: float, error_his
                     "is_error": True
                 })
 
-    return tool_results, has_tool_use, current_errors, coverage_report_called, final_output_called
+    return tool_results, has_tool_use, current_errors
 
 
 def handle_error_temperature_adjustment(current_errors: List[Tuple[str, str]],
@@ -506,6 +380,57 @@ def handle_error_temperature_adjustment(current_errors: List[Tuple[str, str]],
 
     return new_temperature, updated_history
 
+
+
+def call_llm(system_prompt_text : str, message_content: str) -> str:
+    import tools
+
+    # Set WORK_DIRECTORY in tools module so final_output can use it
+    tools.WORK_DIRECTORY = WORK_DIRECTORY
+
+    os.chdir(WORK_DIRECTORY)
+
+    client = Anthropic(api_key=load_api_key(Path.home() / ".llm_keys", "anthropic"))
+
+    # System prompt with cache control
+    system_prompt = [
+        {
+            "type": "text",
+            "text": system_prompt_text,
+            "cache_control": {"type": "ephemeral"}
+        }
+    ]
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": message_content,
+                    "cache_control": {"type": "ephemeral"}
+                }
+            ]
+        }
+    ]
+
+    print(f"### Model: {MODEL} ###")
+    summary = run_llm_query(client, MODEL, messages, system_prompt, REQUIREMENTS)
+    print(f"### Task completed: {summary} ###")
+    return summary
+
+
+def main():
+    call_llm(PROMPTS_SYSTEM_WRITE_PROOF, REQUIREMENTS)
+    call_llm(PROMPTS_SYSTEM_PROMPT_TRANSLATE_PROOF, TRANSLATION_INSTRUCTIONS)
+    call_llm(PROMPTS_SYSTEM_PROMPT_TRANSLATE_VERIFICATION, VERIFICATION_INSTRUCTIONS)
+    result = get_final_output()
+    if "{{{EXPLANATION_ACCEPTED}}}" in result:
+        print("### ALL GOOD! ###")
+    elif "{{{EXPLANATION_REJECTED}}}" in result:
+        print("### REJECTED! ###")
+    else:
+        print("### no answer found :( ###")
 
 if __name__ == '__main__':
     main()

@@ -65,7 +65,7 @@ ALL_TOOLS_JSON = [
     },
     {
         "name": "final_output",
-        "description": "Signal task completion with a detailed summary of work done in markdown format. This tool should ONLY be used in coach mode to signal completion of review and provide feedback.",
+        "description": "Signal task completion with a detailed summary of work done in markdown format.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -300,8 +300,6 @@ WORK_DIRECTORY = None  # Set by main.py at startup
 def final_output(summary: str) -> str:
     """Signal task completion with a detailed summary of work done in markdown format.
 
-    This tool should ONLY be used in coach mode to signal completion of review and provide feedback.
-
     Args:
         summary: What was accomplished - a detailed markdown summary of the work done
     Returns:
@@ -347,6 +345,28 @@ def final_output(summary: str) -> str:
     except Exception as e:
         return f"Error saving final output: {str(e)}"
 
+def get_final_output() -> str:
+    """Retrieves the contents of final_output.md as a string.
+
+    Returns:
+        The content of final_output.md or an error message if not found.
+    """
+    from pathlib import Path
+    global WORK_DIRECTORY
+
+    try:
+        # Resolve the directory exactly as the writer function did
+        output_dir = WORK_DIRECTORY if WORK_DIRECTORY else Path.cwd()
+        output_file = output_dir / "final_output.md"
+
+        if not output_file.exists():
+            return "Error: final_output.md does not exist."
+
+        # Read the text
+        return output_file.read_text(encoding="utf-8")
+
+    except Exception as e:
+        return f"Error reading final output: {str(e)}"
 
 # List of all available tools (needed for @beta_tool)
 # ALL_TOOLS = [call_shell, write_file, str_replace, run_coverage_report, final_output]
