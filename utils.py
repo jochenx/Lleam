@@ -25,3 +25,6 @@ def load_api_key(keys_file:str, provider: str) -> str:
 
     raise ValueError(f"Provider '{provider}' not found in {keys_file}")
 
+def read_file(filepath: str, encoding: str = 'utf-8') -> str:
+    with open(os.path.expanduser(filepath.strip()), 'r', encoding=encoding) as f:
+        return f.read()

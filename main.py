@@ -11,7 +11,7 @@ from anthropic.types import Message
 from tools import ALL_TOOLS_JSON, get_final_output
 from prompts import PROMPTS_SYSTEM_WRITE_PROOF, PROMPTS_SYSTEM_PROMPT_TRANSLATE_PROOF, \
     PROMPTS_SYSTEM_PROMPT_TRANSLATE_VERIFICATION
-from utils import load_api_key
+from utils import load_api_key, read_file
 
 # Create work directory with timestamp
 work_dir = Path.home() / "lleam_scratch"
@@ -20,6 +20,7 @@ WORK_DIRECTORY = work_dir / timestamp
 WORK_DIRECTORY.mkdir(parents=True, exist_ok=True)
 
 CODE_DIRECTORY = " ~/src/Lleam_generated/test1/MyMathlibProject"
+PROOF_FILE = "MyMathlibProject.lean"
 
 # Global configuration
 MODEL = "claude-opus-4-5"
@@ -29,27 +30,34 @@ THINKING_TOKEN_BUDGET = 20_000
 # One strategy for when you run out of tokens is to pass back the partial response and ask for the message to be continued.
 # however, for now, assume that any response over 64k tokens is something we don't want to deal with, then just quit.
 
-RIDDLE = "You know 2 + 2 comes to the same as 2 x 2. Now find a set of three different whole numbers whose sum is equal to their total when multiplied."
+# Random hard riddle taken from https://www.aivd.nl/onderwerpen/aivd-kerstpuzzel/documenten/publicaties/2025/12/10/aivd-kerstpuzzel-2025
+USER_QUESTION = """Please solve this riddle:
+Which number fits in place of X?
+ 3, 1, 8, 5, 18, 188, 2, 28, 23, 7, 27, 88, 238, 38, 278, X"""
 
 REQUIREMENTS = """
     {{REQUIREMENTS}}
 
-    Here is a riddle. Please solve it, and provide a lean 4 proof for your solution. You have full access to the Mathlib library.
-    *CRITICAL*: DO NOT INCLUDE THE ORIGINAL RIDDLE OR ADD ANY COMMENTS TO YOUR LEAN CODE.
+    You must translate this question into
+    a formal form, then solve it, providing a lean 4 proof for your solution. You have full access to the Mathlib library.
+    You MUST attempt to reduce the number of hypotheses to the smallest possible number to make the proof tractable,
+    You MUST also attempt to make the proof as expressive as possible, covering as much of the original question as possible. 
+    *CRITICAL*: DO NOT INCLUDE THE ORIGINAL QUESTION OR ADD ANY COMMENTS TO YOUR LEAN CODE.
     
-    ```""" + RIDDLE + """```
+    ```""" + USER_QUESTION + """```
 
-    In """ + CODE_DIRECTORY + """ Write your proof in MyMathlibProject.lean.
-    """
+    A lean project is set up in """ + CODE_DIRECTORY + """  
+    Write your proof in """ + PROOF_FILE
 
-TRANSLATION_INSTRUCTIONS = """
-    In """ + CODE_DIRECTORY + """ there is a proof in MyMathlibProject.lean. Please explain in plain english what it
+
+TRANSLATION_INSTRUCTIONS = """ 
+    In """ + CODE_DIRECTORY + """ there is a proof in """ + PROOF_FILE + """". Please explain in plain english what it
     proves. Write your output into the """ + CODE_DIRECTORY + """ as 'translation.txt'.
 """
 
 VERIFICATION_INSTRUCTIONS = """
     Read 'translation.txt' in """ + CODE_DIRECTORY + """. Critically evaluate whether the explanation is a valid answer to
-    the riddle ```""" + RIDDLE + """```
+    the question ```""" + USER_QUESTION + """```
 """
 
 
@@ -419,18 +427,28 @@ def call_llm(system_prompt_text : str, message_content: str) -> str:
     print(f"### Task completed: {summary} ###")
     return summary
 
-
 def main():
-    call_llm(PROMPTS_SYSTEM_WRITE_PROOF, REQUIREMENTS)
-    call_llm(PROMPTS_SYSTEM_PROMPT_TRANSLATE_PROOF, TRANSLATION_INSTRUCTIONS)
-    call_llm(PROMPTS_SYSTEM_PROMPT_TRANSLATE_VERIFICATION, VERIFICATION_INSTRUCTIONS)
-    result = get_final_output()
-    if "{{{EXPLANATION_ACCEPTED}}}" in result:
-        print("### ALL GOOD! ###")
-    elif "{{{EXPLANATION_REJECTED}}}" in result:
-        print("### REJECTED! ###")
-    else:
-        print("### no answer found :( ###")
+    requirements = REQUIREMENTS  # copy the initial value
+    done : bool = False
+    attemptNo : int = 0
+    while attemptNo < 3 and not done:
+        attemptNo += 1
+        call_llm(PROMPTS_SYSTEM_WRITE_PROOF, requirements)
+        call_llm(PROMPTS_SYSTEM_PROMPT_TRANSLATE_PROOF, TRANSLATION_INSTRUCTIONS)
+        call_llm(PROMPTS_SYSTEM_PROMPT_TRANSLATE_VERIFICATION, VERIFICATION_INSTRUCTIONS)
+        result = get_final_output()
+        if "{{{EXPLANATION_ACCEPTED}}}" in result:
+            print("### ALL GOOD! ###")
+            done = True
+        elif "{{{EXPLANATION_REJECTED}}}" in result:
+            print("### REJECTED attempt {} ###", attemptNo)
+            requirements = REQUIREMENTS + "\n##PREVIOUS ATTEMPTS WERE INSUFFICIENT - PLEASE ADDRESS FEEDBACK\n " + \
+                            result + " Attempted proof file: ```" + read_file(CODE_DIRECTORY + '/' + PROOF_FILE) + "```"
+        else:
+            print("### no answer found :( ###")
+
+    if not done:
+        print("### FAILED TO FIND A GOOD SOLUTION, QUITTING ###")
 
 if __name__ == '__main__':
     main()

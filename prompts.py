@@ -41,6 +41,9 @@ and looks correct to you.
 
 **how to answer**
 call the final_output function, passing your answer: If the explanation is acceptable "{{{EXPLANATION_ACCEPTED}}}"
-or "{{{EXPLANATION_REJECTED}}}" if not. Do not write anything else. e.g.
-'{"name": "final_output", "input": {"summary": "{{{EXPLANATION_ACCEPTED}}}"}}', 
+or "{{{EXPLANATION_REJECTED}}}" if not. If the explanation is rejected, please include constructive feedback and
+recommendations for improvements such that the proof can be improved.
+'{"name": "final_output", "input": {"summary": "{{{EXPLANATION_ACCEPTED}}}"}}',
+'{"name": "final_output", "input": {"summary": "{{{EXPLANATION_REJECTED}}} The proof does not provide enough coverage. Make sure to not beg the question."}}', 
+ 
 """
