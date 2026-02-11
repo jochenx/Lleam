@@ -2,7 +2,7 @@
 
 `Lleam = LLM + Lean`
 
-A verification tool to help an LLM make statements about truth. Grounding is facilitated by feeding in facts, derivation and conclusion, all anchored in a formal proof. 
+A verification tool to help an LLM make statements about truth. Grounding is facilitated by feeding in facts, derivation and conclusion, a proof provides assurance over the soundness of the reasoning.
 
 Here, the LLM writes a Lean program, which the theorem prover compiles and accepts or rejects. This loop repeats until an acceptable proof is found.
 
